@@ -1,21 +1,32 @@
 import json
 import os
 import re
-import time
-from typing import Generator
+from typing import Generator, Iterable
 
 import scrapy
+from pydispatch import dispatcher
+from scrapy import signals, Request
+from scrapy_selenium import SeleniumRequest
 from selenium import webdriver
 
 from scrapy.http import Response
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.wait import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support import expected_conditions
 from selenium.common.exceptions import (
     TimeoutException,
     ElementNotInteractableException
 )
 from selenium.webdriver.chrome.options import Options
+
+
+class VacancyItem(scrapy.Item):
+    title = scrapy.Field()
+    company = scrapy.Field()
+    salary = scrapy.Field()
+    location = scrapy.Field()
+    description = scrapy.Field()
+    technologies = scrapy.Field()
 
 
 class TechnologiesSpiderSpider(scrapy.Spider):
@@ -28,6 +39,7 @@ class TechnologiesSpiderSpider(scrapy.Spider):
         chrome_options = Options()
         chrome_options.add_argument("--headless")
         self.driver = webdriver.Chrome(options=chrome_options)
+        dispatcher.connect(self.spider_closed, signal=signals.spider_closed)
         config_path = os.path.join(
             os.path.dirname(__file__),
             "../technology_tags.json"
@@ -35,6 +47,10 @@ class TechnologiesSpiderSpider(scrapy.Spider):
         with open(config_path, "r") as f:
             config = json.load(f)
             self.technologies = config.get("technologies", [])
+
+    def start_requests(self) -> Iterable[Request]:
+        url = "https://jobs.dou.ua/vacancies/?category=Python"
+        yield SeleniumRequest(url=url, callback=self.parse)
 
     def parse(
             self,
@@ -45,12 +61,11 @@ class TechnologiesSpiderSpider(scrapy.Spider):
         while True:
             try:
                 more_button = WebDriverWait(self.driver, 10).until(
-                    EC.element_to_be_clickable(
+                    expected_conditions.element_to_be_clickable(
                         (By.CSS_SELECTOR, ".more-btn a")
                     )
                 )
                 more_button.click()
-                time.sleep(2)
             except (TimeoutException, ElementNotInteractableException):
                 print("Кнопка 'Більше вакансій' неактивна, завершення.")
                 break
@@ -67,14 +82,14 @@ class TechnologiesSpiderSpider(scrapy.Spider):
                 vacancy_url = url
                 yield scrapy.Request(
                     vacancy_url,
-                    callback=self.parce_vacancy,
+                    callback=self.parse_vacancy,
                     meta={
                         "salary": salary,
                         "location": location,
                     }
                 )
 
-    def parce_vacancy(self, response: Response) -> dict:
+    def parse_vacancy(self, response: Response) -> dict:
         page_content = response.css(
             "div.b-typo.vacancy-section *::text"
         ).getall()
@@ -85,15 +100,15 @@ class TechnologiesSpiderSpider(scrapy.Spider):
         technologies_in_description = self.extract_technologies(
                     description, self.technologies
                 )
-        vacancy_exp = {
-            "title": response.css(".g-h2::text").get(),
-            "company": response.css(".l-n > a::text").get(),
-            "salary": response.meta["salary"],
-            "location": response.meta["location"],
-            "description": description,
-            "technologies": technologies_in_description,
-        }
-        return vacancy_exp
+        vacancy_exp = VacancyItem(
+            title=response.css(".g-h2::text").get(),
+            company=response.css(".l-n > a::text").get(),
+            salary=response.meta["salary"],
+            location=response.meta["location"],
+            description=description,
+            technologies=technologies_in_description,
+        )
+        yield vacancy_exp
 
     @staticmethod
     def extract_technologies(description, tech_list):
@@ -108,3 +123,7 @@ class TechnologiesSpiderSpider(scrapy.Spider):
             ]
             return ", ".join(found_technologies)
         return "NaN"
+
+    def spider_closed(self, spider):
+        spider.logger.info("Spider closed: %s", spider.name)
+        self.driver.quit()
